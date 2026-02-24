@@ -1,175 +1,164 @@
 # Rebalancer
 
-A portfolio rebalancing system built with FastAPI, Celery, and Redis. This is intentionally the "before" version of a Temporal migration demo — it works, but it embeds every classic pain point of hand-rolled workflow orchestration. See [PAIN_POINTS.md](PAIN_POINTS.md) for the full catalogue.
+Automated crypto portfolio rebalancing with strategy-based fund management, real-time UI, and Celery-driven scheduling. Built on Alpaca's paper trading API (24/7 crypto).
+
+This is intentionally the "before" version of a Temporal migration demo. It works, but embeds every classic pain point of hand-rolled workflow orchestration. See [TEMPORAL_MIGRATION.md](TEMPORAL_MIGRATION.md) for the full analysis.
+
+![Rebalancer UI](https://cdn.zappy.app/3fe83eb40b035c327814b770a0b2c001.png)
+
+## How it works
+
+You create **strategies** that define rules for trading crypto. Each strategy has a type (fixed weight, equal weight, momentum, or contrarian surge), a set of assets, and a rebalance interval. Strategies start inactive. You **fund** a strategy with a dollar amount to activate it. The system then automatically rebalances the strategy's holdings to match its target allocation on the configured schedule.
+
+Each strategy tracks its own holdings independently. Funding one strategy does not affect another. Liquidating a strategy sells only its tracked positions.
+
+### Strategy types
+
+- **Fixed Weight**: Static allocation weights (e.g. 50% BTC, 30% ETH, 20% SOL)
+- **Equal Weight**: Split equally across all assets
+- **Momentum**: Overweight recent top performers, underweight laggards (uses Alpaca crypto data API for price history)
+- **Contrarian Surge**: Mean-reversion (buy the dip) with a rotating surge bonus that changes every 30 seconds. Guaranteed to produce different weights on every evaluation, so it always trades.
+
+### Strategy lifecycle
+
+1. **Create** a strategy (starts inactive)
+2. **Fund** it with a dollar amount (activates it, triggers first rebalance)
+3. The scheduler evaluates due strategies every 10 seconds, creates rebalance jobs
+4. Each job: evaluate strategy -> fetch prices -> plan trades -> submit orders -> poll fills -> sync holdings
+5. **Liquidate** to sell all holdings and deactivate
+6. **Re-fund** to start again
 
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
-- [just](https://github.com/casey/just#installation) (command runner, optional but recommended)
+- [just](https://github.com/casey/just#installation) (command runner)
+- An [Alpaca](https://app.alpaca.markets/signup) paper trading account (free)
 
-## Quick start (local dev with mock API)
+## Quick start
 
-No Alpaca account needed. The local stack uses [Prism](https://stoplight.io/open-source/prism) to serve a fully compliant mock of the Alpaca trading API from their published OpenAPI spec.
+### 1. Create an Alpaca paper trading account
+
+Go to [app.alpaca.markets/signup](https://app.alpaca.markets/signup), confirm your email, set up MFA, then switch to the **Paper Trading** dashboard and generate API keys. Copy both the key ID and secret (the secret is shown only once).
+
+### 2. Configure and run
 
 ```bash
-# Clone and enter the project
 cd rebalancer
 
-# Bootstrap: creates .env, installs deps, starts Docker, runs migrations
+# Create .env from example and fill in your Alpaca keys
+cp .env.example .env
+# Edit .env with your ALPACA_API_KEY and ALPACA_SECRET_KEY
+
+# Bootstrap: install deps, start Docker, run migrations, seed strategies
 just bootstrap
 ```
 
-Or step by step:
+The UI is at **http://localhost:8000**.
 
-```bash
-cp .env.example .env          # local dev defaults point at Prism
-uv sync                        # install all deps (runtime + dev)
-docker compose up --build -d   # start Postgres, Redis, Prism, API, worker, beat
-just migrate                   # run Alembic migrations
-```
+### 3. Fund a strategy
 
-Verify:
+Open the UI, pick a strategy, enter a dollar amount, and click **Fund**. The strategy activates and the first rebalance runs immediately. Subsequent rebalances happen on the configured interval.
 
-```bash
-just health
-# → {"status": "ok", "active_tasks": []}
-```
-
-Try it out:
-
-```bash
-just create-portfolio
-just rebalance
-# copy the job_id from the output, then:
-just job-status <job_id>
-```
-
-## Paper trading setup (real market data)
-
-Paper trading is free — no funding or brokerage application required. Accounts are available globally to anyone with an email address.
-
-### 1. Create an Alpaca account
-
-Go to [https://app.alpaca.markets/signup](https://app.alpaca.markets/signup) and sign up with your email.
-
-Confirm your email via the verification link Alpaca sends.
-
-### 2. Set up MFA
-
-After email confirmation you'll be prompted to activate multi-factor authentication — this is now required before API access is granted.
-
-Use any authenticator app (Google Authenticator, 1Password, Authy, etc.). Complete MFA activation before proceeding.
-
-### 3. Switch to the Paper Trading dashboard
-
-After login you may land on a live account prompt — skip it.
-
-1. In the upper-left corner, click the **account selector**
-2. Choose **Paper Trading** (it exists by default) ![](https://cdn.zappy.app/2683b99b6d9981d289e5bb14e0977988.png)
-3. If it's not listed, click **Open New Paper Account**
-
-Paper accounts start with **$100,000 in simulated cash**.
-
-### 4. Generate API keys
-
-1. In the Paper Trading dashboard, find the **API Keys** panel
-![](https://cdn.zappy.app/9af77ed0234c5d468f84757f0ff7f9fe.png)
-2. Click **Generate New Key**
-3. Copy both values immediately — **the secret is shown only once**. If you lose it, regenerate (this invalidates the old key).
-
-### 5. Update your `.env`
-
-Comment out the local dev block and uncomment the paper trading block:
+## Environment variables
 
 ```env
 DATABASE_URL=postgresql://rebalancer:rebalancer@postgres:5432/rebalancer
 REDIS_URL=redis://redis:6379/0
-
-# --- Local development (Prism mock, no Alpaca account needed) ---
-# ALPACA_API_BASE_URL=http://alpaca-mock:4010
-# ALPACA_API_KEY=local-dev-key
-# ALPACA_SECRET_KEY=local-dev-secret
-
-# --- Paper trading (real market data, free Alpaca account required) ---
 ALPACA_API_BASE_URL=https://paper-api.alpaca.markets
-ALPACA_API_KEY=<your_paper_key_id>
-ALPACA_SECRET_KEY=<your_paper_secret_key>
-```
-
-Then restart the stack:
-
-```bash
-docker compose up --build -d
-```
-
-### Things to know about paper trading
-
-- Orders only fill during market hours (9:30 AM – 4:00 PM ET, weekdays). Orders submitted outside market hours queue for the next open.
-- Partial fills are simulated randomly ~10% of the time.
-- The free IEX data feed covers ~8–10% of market volume. Fine for this demo.
-- Account balance resets require deleting and recreating the paper account.
-- Up to 3 paper accounts can exist simultaneously.
-- Paper trading does **not** simulate dividends or send order fill emails.
-
-### Useful links
-
-| Resource | URL |
-|----------|-----|
-| Dashboard | https://app.alpaca.markets |
-| Paper trading docs | https://docs.alpaca.markets/docs/paper-trading |
-| alpaca-py SDK docs | https://docs.alpaca.markets/docs/about-alpaca-py |
-| Trading OpenAPI spec | https://github.com/alpacahq/alpaca-docs/tree/master/oas |
-
-## Running tests
-
-```bash
-uv run pytest           # all tests
-uv run pytest -v        # verbose
-uv run pytest -k drift  # filter by name
-```
-
-Or with just:
-
-```bash
-just test
-just test -v
-just test -k drift
-```
-
-## Project layout
-
-```
-app/
-  config.py            Settings via pydantic-settings, reads .env
-  database.py          SQLAlchemy engine, session, Base
-  models.py            RebalanceJob, TradeExecution, UserPortfolio
-  schemas.py           Pydantic request/response models
-  alpaca_client.py     Thin wrapper around alpaca-py
-  rebalance_logic.py   Pure functions: drift, threshold, trade sizing
-  celery_app.py        Celery init and Beat schedule
-  tasks.py             All Celery tasks (6 total)
-  main.py              FastAPI routes (7 endpoints)
-alembic/               Database migrations
-tests/                 Unit and integration tests
+ALPACA_API_KEY=your_paper_key_id
+ALPACA_SECRET_KEY=your_paper_secret_key
 ```
 
 ## Just recipes
 
-Run `just` to see all available commands:
-
 ```
-bootstrap    Full bootstrap: .env + install + docker up + migrate
+bootstrap    Full bootstrap: .env + install + docker up + migrate + seed
+reset        Wipe DB, rebuild, re-seed (fresh start)
 up           Start all services
 down         Stop all services
 down-v       Stop all services and destroy volumes
 logs         Tail logs for all services
-migrate      Run Alembic migrations inside the api container
-install      Install all dependencies into a uv-managed venv
-test         Run unit and integration tests
-health       Health check
-...
+log <svc>    Tail logs for a single service
+migrate      Run Alembic migrations
+seed         Seed example crypto strategies
+install      Install all dependencies
+test         Run tests (uv run pytest)
+strategies   List all strategies (curl)
+health       Health check (curl)
+psql         Open a psql shell
 ```
+
+## Running tests
+
+```bash
+just test           # all tests
+just test -v        # verbose
+just test -k drift  # filter by name
+```
+
+32 tests covering domain strategy evaluation, trade planning (drift, cash capping, holdings management), and the Alpaca client adapter.
+
+## Architecture
+
+```
+app/
+  domain/                Pure business logic (no framework deps)
+    strategy.py          Strategy evaluation: 4 types, dispatch, description
+    trading.py           Drift, trade planning, cash capping, holdings sync
+  repositories.py        Repository pattern over SQLAlchemy (all DB access)
+  tasks.py               Thin Celery orchestration wrappers (~220 lines)
+  alpaca_client.py       Alpaca trading + crypto data adapter
+  models.py              SQLAlchemy models: Strategy, RebalanceJob, TradeExecution
+  schemas.py             Pydantic request/response models
+  main.py                FastAPI routes + static file serving
+  celery_app.py          Celery init + Beat schedule
+  seed.py                Example strategy seeder
+  config.py              Settings via pydantic-settings
+  database.py            SQLAlchemy engine + session
+alembic/                 Database migrations
+static/                  Alpine.js + Tailwind CSS UI (single HTML file)
+tests/                   Unit tests for domain + client layers
+```
+
+### Layered design
+
+The codebase follows DDD-inspired separation:
+
+- **Domain layer** (`app/domain/`): Pure functions with zero framework dependencies. Strategy evaluation and trade planning are fully testable with plain Python types.
+- **Repository layer** (`app/repositories.py`): Encapsulates all database access. Every "fetch entity, update field, commit" is a single named method call.
+- **Task layer** (`app/tasks.py`): Thin Celery wrappers that read state from repositories, delegate to domain functions, call the broker, and persist results. No raw SQLAlchemy.
+- **API layer** (`app/main.py`): Thin FastAPI routes.
+
+## Seeded strategies
+
+The seed creates four strategies (all inactive, fund to activate):
+
+| Strategy | Type | Assets | Interval |
+|----------|------|--------|----------|
+| Blue Chip HODL | fixed_weight | BTC 55%, ETH 35%, LTC 10% | 1 day |
+| Alt Season | equal_weight | SOL, AVAX, DOT, LINK, UNI | 10 min |
+| Momentum Top 3 | momentum | BTC, ETH, SOL, DOGE, SHIB, AAVE | 30 sec |
+| Contrarian Surge | contrarian_surge | 15 cryptos (BTC, ETH, SOL, AVAX, DOT, LINK, UNI, AAVE, LTC, DOGE, SHIB, BCH, GRT, CRV, SUSHI) | 30 sec |
+
+## API endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/strategies` | List all strategies |
+| POST | `/strategies` | Create a strategy |
+| GET | `/strategies/:id` | Get strategy detail |
+| PATCH | `/strategies/:id` | Update strategy config |
+| DELETE | `/strategies/:id` | Delete (must liquidate first) |
+| POST | `/strategies/:id/fund` | Fund and activate |
+| POST | `/strategies/:id/liquidate` | Sell all holdings and deactivate |
+| POST | `/rebalance` | Trigger manual rebalance |
+| GET | `/rebalance` | List recent rebalance jobs |
+| GET | `/rebalance/:id` | Get job detail with trades |
+| DELETE | `/rebalance/:id` | Cancel a job |
+| GET | `/account` | Live Alpaca account state |
+| GET | `/health` | Worker health check |
+| GET | `/` | UI |
 
 ## Stack
 
@@ -179,6 +168,11 @@ health       Health check
 - SQLAlchemy 2.x + Alembic
 - PostgreSQL 16
 - alpaca-py (Alpaca Markets SDK)
-- Docker Compose (Postgres, Redis, Prism mock)
+- Alpine.js + Tailwind CSS (UI)
+- Docker Compose (Postgres, Redis, API, worker, beat)
 - uv (package management)
 - just (command runner)
+
+## Known limitations and next steps
+
+This is the "before" version of a Temporal migration. See [TEMPORAL_MIGRATION.md](TEMPORAL_MIGRATION.md) for a detailed analysis of 20 durable execution gaps (task handoff failures, duplicate trades, holdings race conditions, missing saga/compensation) and a phased migration plan.
