@@ -137,22 +137,23 @@ def execute_trades(self, job_id: str, strategy_id: str, planned: list[dict]) -> 
 
     already = trades.symbols_for_job(jid)
 
-    try:
-        for t in planned:
-            if t["symbol"] in already:
-                oid = trades.get_order_id(jid, t["symbol"])
-                if oid:
-                    order_ids.append(oid)
-                continue
+    for t in planned:
+        if t["symbol"] in already:
+            oid = trades.get_order_id(jid, t["symbol"])
+            if oid:
+                order_ids.append(oid)
+            continue
 
+        try:
             order = client.submit_market_order(symbol=t["symbol"], qty=t["qty"], side=t["side"])
             oid = str(order.id)
             trades.record_submission(jid, t["symbol"], t["side"], t["qty"], oid)
             order_ids.append(oid)
+        except Exception as exc:
+            logger.warning("Job %s: skipping %s %s $%.2f — %s", job_id, t["side"], t["symbol"], t["qty"], exc)
 
-    except Exception as exc:
-        jobs.mark_stuck(jid, str(exc))
-        logger.warning("[ALERT] Job %s trade execution failed: %s", job_id, exc)
+    if not order_ids:
+        jobs.mark_stuck(jid, "All trade submissions failed")
         return
 
     jobs.clear_task_id(jid)
