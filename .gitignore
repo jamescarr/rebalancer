@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+mock/
+celerybeat-schedule*
+tmp/

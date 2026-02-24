@@ -1,0 +1,31 @@
+[project]
+name = "rebalancer"
+version = "0.1.0"
+description = "Portfolio rebalancing demo — the 'before' version of a Temporal migration"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.27,<1.0",
+    "celery[redis]>=5.3,<6.0",
+    "redis>=5.0,<6.0",
+    "sqlalchemy>=2.0,<3.0",
+    "alembic>=1.13,<2.0",
+    "pydantic-settings>=2.0,<3.0",
+    "alpaca-py>=0.20,<1.0",
+    "psycopg2-binary>=2.9,<3.0",
+    "httpx>=0.27,<1.0",
+    "pytz>=2025.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-httpx>=0.30,<1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
