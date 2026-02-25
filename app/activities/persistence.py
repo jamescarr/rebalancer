@@ -107,15 +107,17 @@ class ActiveStrategy:
 
 @activity.defn
 async def get_due_strategies() -> list[ActiveStrategy]:
-    """Return active+funded strategies that are past their next evaluation time."""
+    """Return active+funded strategies past their next evaluation time.
+
+    No in-flight check here. Temporal's workflow ID deduplication prevents
+    duplicate rebalances (the scheduler uses a stable workflow ID per strategy).
+    """
     from datetime import datetime, timezone
     now = datetime.now(tz=timezone.utc)
     active = strategies.get_active_funded()
     due: list[ActiveStrategy] = []
     for s in active:
         if s.next_evaluation_at and s.next_evaluation_at > now:
-            continue
-        if jobs.has_in_flight(s.id):
             continue
         due.append(ActiveStrategy(
             id=str(s.id),

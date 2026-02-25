@@ -1,15 +1,18 @@
 """SchedulerWorkflow: long-running workflow that replaces Celery Beat.
 
-Periodically checks for due strategies and starts child RebalanceWorkflows.
-Uses workflow ID deduplication to prevent duplicate rebalances for the same strategy.
+Uses a STABLE workflow ID per strategy (rebalance-{strategy_id}) so Temporal's
+built-in deduplication prevents double rebalances. If a rebalance is already
+running for a strategy, start_child_workflow with the same ID is silently
+rejected. No DB-level in-flight check needed.
+
 Uses continue-as-new every 500 iterations to avoid event history growth.
 """
 
 from datetime import timedelta
-from uuid import uuid4
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 with workflow.unsafe.imports_passed_through():
     from app.activities.persistence import (
@@ -48,11 +51,14 @@ class SchedulerWorkflow:
                     start_to_close_timeout=DB_TIMEOUT, retry_policy=DB_RETRY,
                 )
 
-                await workflow.start_child_workflow(
-                    RebalanceWorkflow.run,
-                    RebalanceInput(job_id=job_id, strategy_id=s.id),
-                    id=f"rebalance-{s.id}-{job_id}",
-                )
+                try:
+                    await workflow.start_child_workflow(
+                        RebalanceWorkflow.run,
+                        RebalanceInput(job_id=job_id, strategy_id=s.id),
+                        id=f"rebalance-{s.id}",
+                    )
+                except WorkflowAlreadyStartedError:
+                    workflow.logger.info("Rebalance already running for strategy %s, skipping", s.id)
 
             await workflow.sleep(CHECK_INTERVAL_SECONDS)
             iteration += 1

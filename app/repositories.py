@@ -119,8 +119,8 @@ class JobRepository:
                 select(RebalanceJob).where(
                     RebalanceJob.strategy_id == strategy_id,
                     RebalanceJob.status.not_in(list(TERMINAL_STATUSES) + [STATUS_STUCK]),
-                )
-            ).scalar_one_or_none() is not None
+                ).limit(1)
+            ).first() is not None
 
     def mark_running(self, job_id: uuid.UUID, task_id: str) -> None:
         with SessionLocal() as db:

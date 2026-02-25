@@ -51,14 +51,14 @@ class LiquidationWorkflow:
     def get_state(self) -> str:
         return self.state
 
-    async def _broker(self, fn, *args):
+    async def _broker(self, fn, *args, **kwargs):
         return await workflow.execute_activity(
-            fn, *args, start_to_close_timeout=BROKER_TIMEOUT, retry_policy=BROKER_RETRY,
+            fn, *args, **kwargs, start_to_close_timeout=BROKER_TIMEOUT, retry_policy=BROKER_RETRY,
         )
 
-    async def _db(self, fn, *args):
+    async def _db(self, fn, *args, **kwargs):
         return await workflow.execute_activity(
-            fn, *args, start_to_close_timeout=DB_TIMEOUT, retry_policy=DB_RETRY,
+            fn, *args, **kwargs, start_to_close_timeout=DB_TIMEOUT, retry_policy=DB_RETRY,
         )
 
     @workflow.run

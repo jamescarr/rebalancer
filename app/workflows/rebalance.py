@@ -87,15 +87,15 @@ class RebalanceWorkflow:
             "error": self.status.error,
         }
 
-    async def _broker(self, activity_fn, *args):
+    async def _broker(self, activity_fn, *args, **kwargs):
         return await workflow.execute_activity(
-            activity_fn, *args,
+            activity_fn, *args, **kwargs,
             start_to_close_timeout=BROKER_TIMEOUT, retry_policy=BROKER_RETRY,
         )
 
-    async def _db(self, activity_fn, *args):
+    async def _db(self, activity_fn, *args, **kwargs):
         return await workflow.execute_activity(
-            activity_fn, *args,
+            activity_fn, *args, **kwargs,
             start_to_close_timeout=DB_TIMEOUT, retry_policy=DB_RETRY,
         )
 
