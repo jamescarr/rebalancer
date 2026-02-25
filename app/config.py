@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     DATABASE_URL: str
-    REDIS_URL: str
+    TEMPORAL_ADDRESS: str = "temporal:7233"
     ALPACA_API_BASE_URL: str
     ALPACA_API_KEY: str
     ALPACA_SECRET_KEY: str

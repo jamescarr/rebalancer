@@ -6,7 +6,7 @@ default:
 # Local dev (Docker)
 # ---------------------------------------------------------------------------
 
-# Start all services (Postgres, Redis, API, worker, beat)
+# Start all services (Postgres, Temporal, API, worker)
 up:
     docker compose up --build -d
 
@@ -34,6 +34,10 @@ migrate:
 seed:
     docker compose exec api python -m app.seed
 
+# Start the scheduler workflow (run once after boot)
+start-scheduler:
+    docker compose exec api python -c "import asyncio; from app.main import start_scheduler; asyncio.run(start_scheduler())"
+
 # Open a psql shell
 psql:
     docker compose exec postgres psql -U rebalancer rebalancer
@@ -52,16 +56,16 @@ env:
 
 # Full bootstrap: .env + install + docker up + migrate + seed
 bootstrap: env install up
-    @echo "Waiting for postgres to be ready..."
-    @sleep 3
+    @echo "Waiting for services to be ready..."
+    @sleep 8
     just migrate
     just seed
-    @echo "Done. UI is at http://localhost:8000"
+    @echo "Done. UI is at http://localhost:8000, Temporal UI at http://localhost:8080"
 
 # Reset everything: wipe DB, rebuild, re-seed
 reset: down-v up
-    @echo "Waiting for postgres to be ready..."
-    @sleep 3
+    @echo "Waiting for services to be ready..."
+    @sleep 8
     just migrate
     just seed
     @echo "Done. Fresh start at http://localhost:8000"

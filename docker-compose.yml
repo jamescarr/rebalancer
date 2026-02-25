@@ -10,10 +10,37 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  redis:
-    image: redis:7
+  temporal-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: temporal
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    volumes:
+      - temporal_db_data:/var/lib/postgresql/data
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      - temporal-db
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-db
     ports:
-      - "6379:6379"
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.36.0
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8080:8080"
 
   api:
     build: .
@@ -27,11 +54,11 @@ services:
       - .env
     depends_on:
       - postgres
-      - redis
+      - temporal
 
-  worker:
+  temporal-worker:
     build: .
-    command: celery -A app.celery_app worker --loglevel=info
+    command: python -m app.worker
     volumes:
       - .:/app
       - /app/.venv
@@ -39,19 +66,8 @@ services:
       - .env
     depends_on:
       - postgres
-      - redis
-
-  beat:
-    build: .
-    command: celery -A app.celery_app beat --loglevel=info
-    volumes:
-      - .:/app
-      - /app/.venv
-    env_file:
-      - .env
-    depends_on:
-      - postgres
-      - redis
+      - temporal
 
 volumes:
   postgres_data:
+  temporal_db_data:
