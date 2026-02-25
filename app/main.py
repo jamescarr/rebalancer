@@ -1,5 +1,7 @@
 """FastAPI routes. Starts Temporal workflows instead of dispatching Celery tasks."""
 
+import asyncio
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,8 +11,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from app.alpaca_client import get_alpaca_client
 from app.config import get_settings
 from app.database import get_db
 from app.models import (
@@ -43,10 +47,6 @@ temporal_client: Client | None = None
 
 async def ensure_scheduler_running() -> None:
     """Start the scheduler workflow if not already running. Retries on failure."""
-    import asyncio
-    import logging
-    from temporalio.client import WorkflowExecutionStatus
-    from temporalio.exceptions import WorkflowAlreadyStartedError
     logger = logging.getLogger(__name__)
 
     for attempt in range(10):
@@ -82,7 +82,6 @@ async def ensure_scheduler_running() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import asyncio
     global temporal_client
     settings = get_settings()
     temporal_client = await Client.connect(settings.TEMPORAL_ADDRESS)
@@ -278,7 +277,6 @@ async def health() -> HealthResponse:
 
 @app.get("/account")
 def get_account_info():
-    from app.alpaca_client import get_alpaca_client
     try:
         client = get_alpaca_client()
         account = client.get_account()

@@ -82,6 +82,8 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+    deploy:
+      replicas: 3
 
 volumes:
   postgres_data:

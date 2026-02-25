@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from alpaca.common.exceptions import APIError as AlpacaAPIError  # re-exported
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
@@ -75,8 +77,6 @@ class AlpacaClient:
         Returns {symbol: pct_change} where pct_change is e.g. 0.05 for +5%.
         Symbols with insufficient data get 0.0.
         """
-        from datetime import datetime, timedelta, timezone
-
         now = datetime.now(tz=timezone.utc)
         start = now - timedelta(days=lookback_days)
 

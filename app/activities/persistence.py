@@ -5,6 +5,7 @@ Each activity owns its own session lifecycle via the repository layer.
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from temporalio import activity
 
@@ -112,7 +113,6 @@ async def get_due_strategies() -> list[ActiveStrategy]:
     No in-flight check here. Temporal's workflow ID deduplication prevents
     duplicate rebalances (the scheduler uses a stable workflow ID per strategy).
     """
-    from datetime import datetime, timezone
     now = datetime.now(tz=timezone.utc)
     active = strategies.get_active_funded()
     due: list[ActiveStrategy] = []
