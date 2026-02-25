@@ -45,27 +45,34 @@ async def ensure_scheduler_running() -> None:
     """Start the scheduler workflow if not already running. Retries on failure."""
     import asyncio
     import logging
+    from temporalio.client import WorkflowExecutionStatus
+    from temporalio.exceptions import WorkflowAlreadyStartedError
     logger = logging.getLogger(__name__)
 
     for attempt in range(10):
         try:
             tc = get_temporal()
+
             try:
                 handle = tc.get_workflow_handle(SCHEDULER_WORKFLOW_ID)
                 desc = await handle.describe()
-                if desc.status and desc.status.name == "RUNNING":
+                if desc.status == WorkflowExecutionStatus.RUNNING:
                     logger.info("Scheduler workflow already running")
                     return
             except Exception:
                 pass
 
-            await tc.start_workflow(
-                SchedulerWorkflow.run, 0,
-                id=SCHEDULER_WORKFLOW_ID,
-                task_queue=TASK_QUEUE,
-            )
-            logger.info("Scheduler workflow started")
+            try:
+                await tc.start_workflow(
+                    SchedulerWorkflow.run, 0,
+                    id=SCHEDULER_WORKFLOW_ID,
+                    task_queue=TASK_QUEUE,
+                )
+                logger.info("Scheduler workflow started")
+            except WorkflowAlreadyStartedError:
+                logger.info("Scheduler workflow already running (caught duplicate start)")
             return
+
         except Exception as e:
             logger.warning("Scheduler start attempt %d failed: %s", attempt + 1, e)
             await asyncio.sleep(3)
