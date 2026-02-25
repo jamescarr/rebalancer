@@ -41,35 +41,47 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 temporal_client: Client | None = None
 
 
-async def start_scheduler() -> None:
-    """Start the scheduler workflow if not already running."""
-    tc = get_temporal()
-    try:
-        handle = tc.get_workflow_handle(SCHEDULER_WORKFLOW_ID)
-        desc = await handle.describe()
-        if desc.status and desc.status.name == "RUNNING":
-            return
-    except Exception:
-        pass
+async def ensure_scheduler_running() -> None:
+    """Start the scheduler workflow if not already running. Retries on failure."""
+    import asyncio
+    import logging
+    logger = logging.getLogger(__name__)
 
-    await tc.start_workflow(
-        SchedulerWorkflow.run, 0,
-        id=SCHEDULER_WORKFLOW_ID,
-        task_queue=TASK_QUEUE,
-    )
+    for attempt in range(10):
+        try:
+            tc = get_temporal()
+            try:
+                handle = tc.get_workflow_handle(SCHEDULER_WORKFLOW_ID)
+                desc = await handle.describe()
+                if desc.status and desc.status.name == "RUNNING":
+                    logger.info("Scheduler workflow already running")
+                    return
+            except Exception:
+                pass
+
+            await tc.start_workflow(
+                SchedulerWorkflow.run, 0,
+                id=SCHEDULER_WORKFLOW_ID,
+                task_queue=TASK_QUEUE,
+            )
+            logger.info("Scheduler workflow started")
+            return
+        except Exception as e:
+            logger.warning("Scheduler start attempt %d failed: %s", attempt + 1, e)
+            await asyncio.sleep(3)
+
+    logger.error("Could not start scheduler after 10 attempts")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     global temporal_client
     settings = get_settings()
     temporal_client = await Client.connect(settings.TEMPORAL_ADDRESS)
-    try:
-        await start_scheduler()
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning("Could not start scheduler: %s", e)
+    scheduler_task = asyncio.create_task(ensure_scheduler_running())
     yield
+    scheduler_task.cancel()
     temporal_client = None
 
 

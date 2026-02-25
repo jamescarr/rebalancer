@@ -57,18 +57,24 @@ env:
 # Full bootstrap: .env + install + docker up + migrate + seed
 bootstrap: env install up
     @echo "Waiting for services to be ready..."
-    @sleep 8
+    @sleep 15
     just migrate
     just seed
-    @echo "Done. UI is at http://localhost:8000, Temporal UI at http://localhost:8080"
+    @echo ""
+    @echo "Done!"
+    @echo "  App UI:      http://localhost:8000"
+    @echo "  Temporal UI: http://localhost:8080"
 
 # Reset everything: wipe DB, rebuild, re-seed
 reset: down-v up
     @echo "Waiting for services to be ready..."
-    @sleep 8
+    @sleep 15
     just migrate
     just seed
-    @echo "Done. Fresh start at http://localhost:8000"
+    @echo ""
+    @echo "Done! Fresh start."
+    @echo "  App UI:      http://localhost:8000"
+    @echo "  Temporal UI: http://localhost:8080"
 
 # ---------------------------------------------------------------------------
 # Code quality

@@ -9,6 +9,11 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rebalancer"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
 
   temporal-db:
     image: postgres:16
@@ -18,11 +23,17 @@ services:
       POSTGRES_PASSWORD: temporal
     volumes:
       - temporal_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
 
   temporal:
-    image: temporalio/auto-setup:1.25.2
+    image: temporalio/auto-setup:1.24.2
     depends_on:
-      - temporal-db
+      temporal-db:
+        condition: service_healthy
     environment:
       - DB=postgres12
       - DB_PORT=5432
@@ -33,7 +44,7 @@ services:
       - "7233:7233"
 
   temporal-ui:
-    image: temporalio/ui:2.36.0
+    image: temporalio/ui:2.45.3
     depends_on:
       - temporal
     environment:
@@ -53,8 +64,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - postgres
-      - temporal
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
 
   temporal-worker:
     build: .
@@ -65,8 +78,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - postgres
-      - temporal
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
 
 volumes:
   postgres_data:
