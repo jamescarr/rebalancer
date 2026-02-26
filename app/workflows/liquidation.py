@@ -1,10 +1,8 @@
 """LiquidationWorkflow: sells all strategy holdings, clears only after all fills confirm."""
 
 from dataclasses import dataclass
-from datetime import timedelta
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
@@ -19,18 +17,10 @@ with workflow.unsafe.imports_passed_through():
         record_trade_submission,
         update_trade_fill,
     )
-
-
-BROKER_RETRY = RetryPolicy(
-    initial_interval=timedelta(seconds=2),
-    backoff_coefficient=2.0,
-    maximum_attempts=5,
-    non_retryable_error_types=["InsufficientFunds"],
-)
-BROKER_TIMEOUT = timedelta(seconds=30)
-DB_TIMEOUT = timedelta(seconds=10)
-DB_RETRY = RetryPolicy(initial_interval=timedelta(seconds=1), maximum_attempts=3)
-FILL_POLL_DEADLINE = timedelta(minutes=5)
+    from app.workflows.shared import (
+        BROKER_RETRY, BROKER_TIMEOUT, DB_RETRY, DB_TIMEOUT,
+        FILL_POLL_DEADLINE, FILL_POLL_INTERVAL_SECONDS, MIN_QTY_THRESHOLD,
+    )
 
 
 @dataclass
@@ -51,14 +41,16 @@ class LiquidationWorkflow:
     def get_state(self) -> str:
         return self.state
 
-    async def _broker(self, fn, *args, **kwargs):
+    async def _broker(self, activity_fn, *args, **kwargs):
         return await workflow.execute_activity(
-            fn, *args, **kwargs, start_to_close_timeout=BROKER_TIMEOUT, retry_policy=BROKER_RETRY,
+            activity_fn, *args, **kwargs,
+            start_to_close_timeout=BROKER_TIMEOUT, retry_policy=BROKER_RETRY,
         )
 
-    async def _db(self, fn, *args, **kwargs):
+    async def _db(self, activity_fn, *args, **kwargs):
         return await workflow.execute_activity(
-            fn, *args, **kwargs, start_to_close_timeout=DB_TIMEOUT, retry_policy=DB_RETRY,
+            activity_fn, *args, **kwargs,
+            start_to_close_timeout=DB_TIMEOUT, retry_policy=DB_RETRY,
         )
 
     @workflow.run
@@ -78,14 +70,14 @@ class LiquidationWorkflow:
 
         for symbol, info in snap["holdings"].items():
             qty = info.get("qty", 0) if isinstance(info, dict) else 0
-            if qty < 1e-6:
+            if qty < MIN_QTY_THRESHOLD:
                 continue
             try:
                 result = await self._broker(submit_qty_order, args=[symbol, qty, "sell"])
                 await self._db(record_trade_submission, args=[jid, symbol, "sell", qty, result.order_id])
                 self._order_ids.append(result.order_id)
-            except ActivityError:
-                workflow.logger.warning("Failed to sell %s", symbol)
+            except ActivityError as exc:
+                workflow.logger.warning("Failed to sell %s (qty=%.6f): %s", symbol, qty, exc.cause)
 
         if not self._order_ids:
             await self._db(mark_job_stuck, args=[jid, "All sell submissions failed"])
@@ -105,9 +97,11 @@ class LiquidationWorkflow:
             if len(self._filled) == len(self._order_ids):
                 break
             if workflow.now() > deadline:
-                workflow.logger.warning("Liquidation fill timeout. Unfilled: %s", pending)
+                unfilled = [o for o in self._order_ids if o not in self._filled]
+                workflow.logger.warning("Liquidation fill timeout. Unfilled: %s", unfilled)
+                await self._db(mark_job_stuck, args=[jid, f"Fill timeout. Unfilled: {unfilled}"])
                 break
-            await workflow.sleep(15)
+            await workflow.sleep(FILL_POLL_INTERVAL_SECONDS)
 
         self.state = "clearing_holdings"
         await self._db(clear_strategy_for_liquidation, sid)

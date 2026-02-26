@@ -34,10 +34,6 @@ migrate:
 seed:
     docker compose exec api python -m app.seed
 
-# Start the scheduler workflow (run once after boot)
-start-scheduler:
-    docker compose exec api python -c "import asyncio; from app.main import start_scheduler; asyncio.run(start_scheduler())"
-
 # Open a psql shell
 psql:
     docker compose exec postgres psql -U rebalancer rebalancer
@@ -60,6 +56,8 @@ bootstrap: env install up
     @sleep 15
     just migrate
     just seed
+    docker compose restart temporal-worker
+    docker compose restart api
     @echo ""
     @echo "Done!"
     @echo "  App UI:      http://localhost:8000"
@@ -71,6 +69,8 @@ reset: down-v up
     @sleep 15
     just migrate
     just seed
+    docker compose restart temporal-worker
+    docker compose restart api
     @echo ""
     @echo "Done! Fresh start."
     @echo "  App UI:      http://localhost:8000"

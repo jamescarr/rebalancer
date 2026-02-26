@@ -4,11 +4,10 @@ Evaluates strategy, plans trades, submits orders, polls fills, syncs holdings.
 Worker crashes replay from the last checkpoint. Failed orders are skipped, not retried.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
@@ -36,22 +35,10 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.domain import strategy as strategy_domain
     from app.domain import trading
-
-
-BROKER_RETRY = RetryPolicy(
-    initial_interval=timedelta(seconds=2),
-    backoff_coefficient=2.0,
-    maximum_interval=timedelta(minutes=2),
-    maximum_attempts=5,
-    non_retryable_error_types=["InsufficientFunds", "InvalidSymbol", "InvalidInput"],
-)
-
-DB_RETRY = RetryPolicy(initial_interval=timedelta(seconds=1), maximum_attempts=3)
-
-BROKER_TIMEOUT = timedelta(seconds=30)
-DB_TIMEOUT = timedelta(seconds=10)
-FILL_POLL_INTERVAL = 15
-FILL_POLL_DEADLINE = timedelta(minutes=5)
+    from app.workflows.shared import (
+        BROKER_RETRY, BROKER_TIMEOUT, DB_RETRY, DB_TIMEOUT,
+        FILL_POLL_DEADLINE, FILL_POLL_INTERVAL_SECONDS,
+    )
 
 
 @dataclass
@@ -113,7 +100,6 @@ class RebalanceWorkflow:
 
         self.status.state = "evaluating"
         allocation, desc = await self._evaluate(snap)
-
         await self._db(update_strategy_evaluation, args=[sid, allocation, desc, snap["rebalance_interval_seconds"]])
 
         self.status.state = "fetching_positions"
@@ -191,9 +177,9 @@ class RebalanceWorkflow:
                 )
                 self._submitted_orders.append(result.order_id)
                 self.status.submitted_count += 1
-            except ActivityError:
+            except ActivityError as exc:
                 self.status.skipped_count += 1
-                workflow.logger.warning("Skipped %s %s $%.2f", t["side"], t["symbol"], t["qty"])
+                workflow.logger.warning("Skipped %s %s $%.2f: %s", t["side"], t["symbol"], t["qty"], exc.cause)
 
     async def _poll_fills(self, jid: str) -> None:
         deadline = workflow.now() + FILL_POLL_DEADLINE
@@ -204,7 +190,7 @@ class RebalanceWorkflow:
 
             for oid in pending:
                 status = await self._broker(check_order_status, oid)
-                if "filled" in status["status"] and "partially" not in status["status"]:
+                if status["status"] == "filled":
                     await self._db(
                         update_trade_fill,
                         args=[oid, "filled", status["filled_qty"], status["filled_avg_price"]],
@@ -220,4 +206,4 @@ class RebalanceWorkflow:
                 await self._db(mark_job_stuck, args=[jid, self.status.error])
                 break
 
-            await workflow.sleep(FILL_POLL_INTERVAL)
+            await workflow.sleep(FILL_POLL_INTERVAL_SECONDS)
