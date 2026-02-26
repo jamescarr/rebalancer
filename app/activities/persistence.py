@@ -5,10 +5,10 @@ Each activity owns its own session lifecycle via the repository layer.
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from temporalio import activity
 
+from app.domain.strategy import is_due_for_evaluation
 from app.repositories import JobRepository, StrategyRepository, TradeExecutionRepository
 
 strategies = StrategyRepository()
@@ -110,14 +110,13 @@ class ActiveStrategy:
 async def get_due_strategies() -> list[ActiveStrategy]:
     """Return active+funded strategies past their next evaluation time.
 
-    No in-flight check here. Temporal's workflow ID deduplication prevents
-    duplicate rebalances (the scheduler uses a stable workflow ID per strategy).
+    Scheduling logic (is_due_for_evaluation) lives in the domain layer.
+    Deduplication is handled by Temporal workflow ID, not here.
     """
-    now = datetime.now(tz=timezone.utc)
     active = strategies.get_active_funded()
     due: list[ActiveStrategy] = []
     for s in active:
-        if s.next_evaluation_at and s.next_evaluation_at > now:
+        if not is_due_for_evaluation(s.next_evaluation_at):
             continue
         due.append(ActiveStrategy(
             id=str(s.id),

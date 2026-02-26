@@ -1,7 +1,9 @@
 """Tests for app.domain.strategy — pure strategy evaluation logic."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
-from app.domain.strategy import evaluate, needs_price_data, describe
+from app.domain.strategy import evaluate, is_due_for_evaluation, needs_price_data, describe
 
 
 class TestFixedWeight:
@@ -69,3 +71,16 @@ class TestMeta:
     def test_describe_includes_allocation(self):
         desc = describe("fixed_weight", {"A": 0.5, "B": 0.5})
         assert "A: 50%" in desc
+
+
+class TestScheduling:
+    def test_none_is_due(self):
+        assert is_due_for_evaluation(None) is True
+
+    def test_past_time_is_due(self):
+        past = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
+        assert is_due_for_evaluation(past) is True
+
+    def test_future_time_is_not_due(self):
+        future = datetime.now(tz=timezone.utc) + timedelta(minutes=5)
+        assert is_due_for_evaluation(future) is False
