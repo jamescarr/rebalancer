@@ -6,7 +6,7 @@ default:
 # Local dev (Docker)
 # ---------------------------------------------------------------------------
 
-# Start all services (Postgres, Redis, API, worker, beat)
+# Start all services (Postgres, Temporal, API, worker)
 up:
     docker compose up --build -d
 
@@ -52,19 +52,29 @@ env:
 
 # Full bootstrap: .env + install + docker up + migrate + seed
 bootstrap: env install up
-    @echo "Waiting for postgres to be ready..."
-    @sleep 3
+    @echo "Waiting for services to be ready..."
+    @sleep 15
     just migrate
     just seed
-    @echo "Done. UI is at http://localhost:8000"
+    docker compose restart temporal-worker
+    docker compose restart api
+    @echo ""
+    @echo "Done!"
+    @echo "  App UI:      http://localhost:8000"
+    @echo "  Temporal UI: http://localhost:8080"
 
 # Reset everything: wipe DB, rebuild, re-seed
 reset: down-v up
-    @echo "Waiting for postgres to be ready..."
-    @sleep 3
+    @echo "Waiting for services to be ready..."
+    @sleep 15
     just migrate
     just seed
-    @echo "Done. Fresh start at http://localhost:8000"
+    docker compose restart temporal-worker
+    docker compose restart api
+    @echo ""
+    @echo "Done! Fresh start."
+    @echo "  App UI:      http://localhost:8000"
+    @echo "  Temporal UI: http://localhost:8080"
 
 # ---------------------------------------------------------------------------
 # Code quality

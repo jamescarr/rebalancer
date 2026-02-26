@@ -9,11 +9,49 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rebalancer"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
 
-  redis:
-    image: redis:7
+  temporal-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: temporal
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    volumes:
+      - temporal_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    depends_on:
+      temporal-db:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-db
     ports:
-      - "6379:6379"
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.45.3
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8080:8080"
 
   api:
     build: .
@@ -26,32 +64,27 @@ services:
     env_file:
       - .env
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
 
-  worker:
+  temporal-worker:
     build: .
-    command: celery -A app.celery_app worker --loglevel=info
+    command: python -m app.worker
     volumes:
       - .:/app
       - /app/.venv
     env_file:
       - .env
     depends_on:
-      - postgres
-      - redis
-
-  beat:
-    build: .
-    command: celery -A app.celery_app beat --loglevel=info
-    volumes:
-      - .:/app
-      - /app/.venv
-    env_file:
-      - .env
-    depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    deploy:
+      replicas: 3
 
 volumes:
   postgres_data:
+  temporal_db_data:

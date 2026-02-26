@@ -1,14 +1,21 @@
+"""FastAPI routes. Starts Temporal workflows instead of dispatching Celery tasks."""
+
+import asyncio
+import logging
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from celery.app.control import Inspect
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from app.celery_app import app as celery_app
+from app.alpaca_client import get_alpaca_client
+from app.config import get_settings
 from app.database import get_db
 from app.models import (
     STRATEGY_TYPES,
@@ -27,11 +34,74 @@ from app.schemas import (
     TriggerRebalanceRequest,
     UpdateStrategyRequest,
 )
-from app.tasks import liquidate_strategy_holdings, run_strategy_rebalance
+from app.workflows.liquidation import LiquidationInput, LiquidationWorkflow
+from app.workflows.rebalance import RebalanceInput, RebalanceWorkflow
+from app.workflows.scheduler import SchedulerWorkflow
 
-app = FastAPI(title="Rebalancer", description="Crypto strategy rebalancing service")
-
+TASK_QUEUE = "rebalancer"
+SCHEDULER_WORKFLOW_ID = "rebalancer-scheduler"
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+temporal_client: Client | None = None
+
+
+async def ensure_scheduler_running() -> None:
+    """Start the scheduler workflow if not already running. Retries on failure."""
+    logger = logging.getLogger(__name__)
+
+    for attempt in range(10):
+        try:
+            tc = get_temporal()
+
+            try:
+                handle = tc.get_workflow_handle(SCHEDULER_WORKFLOW_ID)
+                desc = await handle.describe()
+                if desc.status == WorkflowExecutionStatus.RUNNING:
+                    logger.info("Scheduler workflow already running")
+                    return
+            except Exception:
+                pass
+
+            try:
+                await tc.start_workflow(
+                    SchedulerWorkflow.run, 0,
+                    id=SCHEDULER_WORKFLOW_ID,
+                    task_queue=TASK_QUEUE,
+                )
+                logger.info("Scheduler workflow started")
+            except WorkflowAlreadyStartedError:
+                logger.info("Scheduler workflow already running (caught duplicate start)")
+            return
+
+        except Exception as e:
+            logger.warning("Scheduler start attempt %d failed: %s", attempt + 1, e)
+            await asyncio.sleep(3)
+
+    logger.error("Could not start scheduler after 10 attempts")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global temporal_client
+    settings = get_settings()
+    temporal_client = await Client.connect(settings.TEMPORAL_ADDRESS)
+    scheduler_task = asyncio.create_task(ensure_scheduler_running())
+    yield
+    scheduler_task.cancel()
+    temporal_client = None
+
+
+app = FastAPI(
+    title="Rebalancer",
+    description="Crypto strategy rebalancing service (Temporal)",
+    lifespan=lifespan,
+)
+
+
+def get_temporal() -> Client:
+    if temporal_client is None:
+        raise HTTPException(status_code=503, detail="Temporal client not connected")
+    return temporal_client
 
 
 # ---------------------------------------------------------------------------
@@ -47,25 +117,14 @@ def list_strategies(db: Session = Depends(get_db)) -> list[Strategy]:
 
 
 @app.post("/strategies", response_model=StrategyResponse, status_code=201)
-def create_strategy(
-    body: CreateStrategyRequest, db: Session = Depends(get_db)
-) -> Strategy:
+def create_strategy(body: CreateStrategyRequest, db: Session = Depends(get_db)) -> Strategy:
     if body.strategy_type not in STRATEGY_TYPES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"strategy_type must be one of {sorted(STRATEGY_TYPES)}",
-        )
+        raise HTTPException(status_code=422, detail=f"strategy_type must be one of {sorted(STRATEGY_TYPES)}")
     strategy = Strategy(
-        name=body.name,
-        description=body.description,
-        strategy_type=body.strategy_type,
-        assets=body.assets,
-        config=body.config,
+        name=body.name, description=body.description, strategy_type=body.strategy_type,
+        assets=body.assets, config=body.config,
         rebalance_interval_seconds=body.rebalance_interval_seconds,
-        drift_threshold=body.drift_threshold,
-        is_active=False,
-        funded_amount=None,
-        holdings={},
+        drift_threshold=body.drift_threshold, is_active=False, funded_amount=None, holdings={},
     )
     db.add(strategy)
     db.commit()
@@ -75,98 +134,74 @@ def create_strategy(
 
 @app.get("/strategies/{strategy_id}", response_model=StrategyResponse)
 def get_strategy(strategy_id: uuid.UUID, db: Session = Depends(get_db)) -> Strategy:
-    strategy = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id)
-    ).scalar_one_or_none()
-    if strategy is None:
+    s = db.execute(select(Strategy).where(Strategy.id == strategy_id)).scalar_one_or_none()
+    if s is None:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    return strategy
+    return s
 
 
 @app.patch("/strategies/{strategy_id}", response_model=StrategyResponse)
-def update_strategy(
-    strategy_id: uuid.UUID,
-    body: UpdateStrategyRequest,
-    db: Session = Depends(get_db),
-) -> Strategy:
-    strategy = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id)
-    ).scalar_one_or_none()
-    if strategy is None:
+def update_strategy(strategy_id: uuid.UUID, body: UpdateStrategyRequest, db: Session = Depends(get_db)) -> Strategy:
+    s = db.execute(select(Strategy).where(Strategy.id == strategy_id)).scalar_one_or_none()
+    if s is None:
         raise HTTPException(status_code=404, detail="Strategy not found")
-
-    updates = body.model_dump(exclude_unset=True)
-    for key, value in updates.items():
-        setattr(strategy, key, value)
+    for k, v in body.model_dump(exclude_unset=True).items():
+        setattr(s, k, v)
     db.commit()
-    db.refresh(strategy)
-    return strategy
+    db.refresh(s)
+    return s
 
 
 @app.delete("/strategies/{strategy_id}", status_code=204)
 def delete_strategy(strategy_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
-    strategy = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id)
-    ).scalar_one_or_none()
-    if strategy is None:
+    s = db.execute(select(Strategy).where(Strategy.id == strategy_id)).scalar_one_or_none()
+    if s is None:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    if strategy.is_active:
+    if s.is_active:
         raise HTTPException(status_code=409, detail="Liquidate strategy before deleting")
-    db.delete(strategy)
+    db.delete(s)
     db.commit()
 
 
 @app.post("/strategies/{strategy_id}/fund", response_model=StrategyResponse)
-def fund_strategy(
-    strategy_id: uuid.UUID,
-    body: FundStrategyRequest,
-    db: Session = Depends(get_db),
-) -> Strategy:
-    strategy = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id)
-    ).scalar_one_or_none()
-    if strategy is None:
+def fund_strategy(strategy_id: uuid.UUID, body: FundStrategyRequest, db: Session = Depends(get_db)) -> Strategy:
+    s = db.execute(select(Strategy).where(Strategy.id == strategy_id)).scalar_one_or_none()
+    if s is None:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    if strategy.is_active:
+    if s.is_active:
         raise HTTPException(status_code=409, detail="Strategy is already funded and active")
-
-    strategy.funded_amount = body.amount
-    strategy.is_active = True
-    strategy.holdings = {}
+    s.funded_amount = body.amount
+    s.is_active = True
+    s.holdings = {}
     db.commit()
-    db.refresh(strategy)
-    return strategy
+    db.refresh(s)
+    return s
 
 
 @app.post("/strategies/{strategy_id}/liquidate", response_model=RebalanceJobResponse)
-def liquidate_strategy(
-    strategy_id: uuid.UUID,
-    db: Session = Depends(get_db),
-) -> RebalanceJob:
-    strategy = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id)
-    ).scalar_one_or_none()
-    if strategy is None:
+async def liquidate_strategy(strategy_id: uuid.UUID, db: Session = Depends(get_db)) -> RebalanceJob:
+    tc = get_temporal()
+    s = db.execute(select(Strategy).where(Strategy.id == strategy_id)).scalar_one_or_none()
+    if s is None:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    if not strategy.holdings:
-        strategy.is_active = False
-        strategy.funded_amount = None
+    if not s.holdings:
+        s.is_active = False
+        s.funded_amount = None
         db.commit()
         raise HTTPException(status_code=409, detail="Strategy has no holdings to liquidate")
 
-    strategy.is_active = False
-
-    job = RebalanceJob(
-        strategy_id=strategy.id,
-        account_id="liquidation",
-        target_allocation={},
-        drift_threshold=0,
-    )
+    s.is_active = False
+    job = RebalanceJob(strategy_id=s.id, account_id="liquidation", target_allocation={}, drift_threshold=0)
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    liquidate_strategy_holdings.delay(str(job.id), str(strategy.id))
+    await tc.start_workflow(
+        LiquidationWorkflow.run,
+        LiquidationInput(job_id=str(job.id), strategy_id=str(strategy_id)),
+        id=f"liquidate-{strategy_id}-{job.id}",
+        task_queue=TASK_QUEUE,
+    )
     return job
 
 
@@ -176,72 +211,51 @@ def liquidate_strategy(
 
 
 @app.post("/rebalance", response_model=RebalanceJobResponse, status_code=202)
-def trigger_rebalance(
-    body: TriggerRebalanceRequest, db: Session = Depends(get_db)
-) -> RebalanceJob:
-    strategy = db.execute(
-        select(Strategy).where(Strategy.id == body.strategy_id)
-    ).scalar_one_or_none()
-    if strategy is None:
+async def trigger_rebalance(body: TriggerRebalanceRequest, db: Session = Depends(get_db)) -> RebalanceJob:
+    tc = get_temporal()
+    s = db.execute(select(Strategy).where(Strategy.id == body.strategy_id)).scalar_one_or_none()
+    if s is None:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    if not strategy.is_active or not strategy.funded_amount:
+    if not s.is_active or not s.funded_amount:
         raise HTTPException(status_code=409, detail="Strategy must be funded and active")
 
-    job = RebalanceJob(
-        strategy_id=strategy.id,
-        account_id="default",
-        target_allocation={},
-        drift_threshold=strategy.drift_threshold,
-    )
+    job = RebalanceJob(strategy_id=s.id, account_id="default", target_allocation={}, drift_threshold=s.drift_threshold)
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    run_strategy_rebalance.delay(str(job.id), str(strategy.id))
+    await tc.start_workflow(
+        RebalanceWorkflow.run,
+        RebalanceInput(job_id=str(job.id), strategy_id=str(body.strategy_id)),
+        id=f"rebalance-{body.strategy_id}-{job.id}",
+        task_queue=TASK_QUEUE,
+    )
     return job
 
 
 @app.get("/rebalance", response_model=list[RebalanceJobDetailResponse])
-def list_rebalance_jobs(
-    limit: int = 30, db: Session = Depends(get_db)
-) -> list[RebalanceJob]:
-    jobs = list(
-        db.execute(
-            select(RebalanceJob)
-            .order_by(RebalanceJob.created_at.desc())
-            .limit(limit)
-        )
-        .scalars()
-        .all()
-    )
-    for job in jobs:
-        _ = job.trade_executions
+def list_rebalance_jobs(limit: int = 30, db: Session = Depends(get_db)) -> list[RebalanceJob]:
+    jobs = list(db.execute(select(RebalanceJob).order_by(RebalanceJob.created_at.desc()).limit(limit)).scalars().all())
+    for j in jobs:
+        _ = j.trade_executions
     return jobs
 
 
 @app.get("/rebalance/{job_id}", response_model=RebalanceJobDetailResponse)
-def get_rebalance_job(
-    job_id: uuid.UUID, db: Session = Depends(get_db)
-) -> RebalanceJob:
-    job = db.execute(
-        select(RebalanceJob).where(RebalanceJob.id == job_id)
-    ).scalar_one_or_none()
-    if job is None:
+def get_rebalance_job(job_id: uuid.UUID, db: Session = Depends(get_db)) -> RebalanceJob:
+    j = db.execute(select(RebalanceJob).where(RebalanceJob.id == job_id)).scalar_one_or_none()
+    if j is None:
         raise HTTPException(status_code=404, detail="Rebalance job not found")
-    _ = job.trade_executions
-    return job
+    _ = j.trade_executions
+    return j
 
 
 @app.delete("/rebalance/{job_id}", status_code=200)
-def cancel_rebalance_job(
-    job_id: uuid.UUID, db: Session = Depends(get_db)
-) -> dict[str, str]:
-    job = db.execute(
-        select(RebalanceJob).where(RebalanceJob.id == job_id)
-    ).scalar_one_or_none()
-    if job is None:
+def cancel_rebalance_job(job_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, str]:
+    j = db.execute(select(RebalanceJob).where(RebalanceJob.id == job_id)).scalar_one_or_none()
+    if j is None:
         raise HTTPException(status_code=404, detail="Rebalance job not found")
-    job.status = STATUS_CANCELLING
+    j.status = STATUS_CANCELLING
     db.commit()
     return {"status": STATUS_CANCELLING, "job_id": str(job_id)}
 
@@ -252,23 +266,17 @@ def cancel_rebalance_job(
 
 
 @app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
+async def health() -> HealthResponse:
+    tc = get_temporal()
     try:
-        inspector: Inspect = celery_app.control.inspect(timeout=1.0)
-        active = inspector.active()
-        if active is None:
-            return HealthResponse(status="no_workers", active_tasks=None)
-        all_tasks: list[dict] = []
-        for worker_tasks in active.values():
-            all_tasks.extend(worker_tasks)
-        return HealthResponse(status="ok", active_tasks=all_tasks)
+        await tc.service_client.check_health()
+        return HealthResponse(status="ok", active_tasks=None)
     except Exception:
         return HealthResponse(status="error", active_tasks=None)
 
 
 @app.get("/account")
 def get_account_info():
-    from app.alpaca_client import get_alpaca_client
     try:
         client = get_alpaca_client()
         account = client.get_account()
@@ -279,8 +287,7 @@ def get_account_info():
             "buying_power": float(account.buying_power),
             "positions": [
                 {
-                    "symbol": p.symbol,
-                    "qty": float(p.qty),
+                    "symbol": p.symbol, "qty": float(p.qty),
                     "market_value": float(p.market_value),
                     "avg_entry_price": float(p.avg_entry_price),
                     "current_price": float(p.current_price),
