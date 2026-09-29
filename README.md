@@ -54,7 +54,7 @@ cp .env.example .env
 just bootstrap
 ```
 
-The UI is at **http://localhost:8000**.
+The app UI is at **http://localhost:8000**. The Temporal UI (workflow visibility, history, and debugging) is at **http://localhost:8080**.
 
 ### 3. Fund a strategy
 
@@ -64,7 +64,7 @@ Open the UI, pick a strategy, enter a dollar amount, and click **Fund**. The str
 
 ```env
 DATABASE_URL=postgresql://rebalancer:rebalancer@postgres:5432/rebalancer
-REDIS_URL=redis://redis:6379/0
+TEMPORAL_ADDRESS=temporal:7233
 ALPACA_API_BASE_URL=https://paper-api.alpaca.markets
 ALPACA_API_KEY=your_paper_key_id
 ALPACA_SECRET_KEY=your_paper_secret_key
@@ -164,12 +164,12 @@ The seed creates four strategies (all inactive, fund to activate):
 
 - Python 3.14
 - FastAPI + Uvicorn
-- Celery 5.x with Redis broker/backend
+- Temporal (durable workflow execution)
 - SQLAlchemy 2.x + Alembic
 - PostgreSQL 16
 - alpaca-py (Alpaca Markets SDK)
 - Alpine.js + Tailwind CSS (UI)
-- Docker Compose (Postgres, Redis, API, worker, beat)
+- Docker Compose (Postgres, Temporal server + UI, API, worker)
 - uv (package management)
 - just (command runner)
 

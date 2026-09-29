@@ -1,4 +1,4 @@
-"""Strategy evaluation — pure functions that compute target allocations.
+"""Strategy evaluation and scheduling — pure functions.
 
 No framework dependencies. All inputs/outputs are plain Python types.
 """
@@ -6,6 +6,14 @@ No framework dependencies. All inputs/outputs are plain Python types.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
+
+
+def is_due_for_evaluation(next_evaluation_at: datetime | None) -> bool:
+    """Return True if a strategy is past its scheduled evaluation time."""
+    if next_evaluation_at is None:
+        return True
+    return datetime.now(tz=timezone.utc) >= next_evaluation_at
 
 
 def evaluate(

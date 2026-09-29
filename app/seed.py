@@ -54,8 +54,9 @@ SEED_STRATEGIES = [
 
 
 def seed() -> None:
+    from sqlalchemy import func, select
     with SessionLocal() as db:
-        existing = db.query(Strategy).count()
+        existing = db.execute(select(func.count()).select_from(Strategy)).scalar()
         if existing > 0:
             print(f"Database already has {existing} strategies, skipping seed.")
             return

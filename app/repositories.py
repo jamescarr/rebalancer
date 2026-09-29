@@ -113,15 +113,6 @@ class JobRepository:
             db.refresh(job)
             return job
 
-    def has_in_flight(self, strategy_id: uuid.UUID) -> bool:
-        with SessionLocal() as db:
-            return db.execute(
-                select(RebalanceJob).where(
-                    RebalanceJob.strategy_id == strategy_id,
-                    RebalanceJob.status.not_in(list(TERMINAL_STATUSES) + [STATUS_STUCK]),
-                )
-            ).scalar_one_or_none() is not None
-
     def mark_running(self, job_id: uuid.UUID, task_id: str) -> None:
         with SessionLocal() as db:
             job = db.execute(select(RebalanceJob).where(RebalanceJob.id == job_id)).scalar_one()
@@ -174,39 +165,8 @@ class JobRepository:
             job.trades_calculated_at = _now()
             db.commit()
 
-    def set_error(self, job_id: uuid.UUID, error: str) -> None:
-        with SessionLocal() as db:
-            job = db.execute(select(RebalanceJob).where(RebalanceJob.id == job_id)).scalar_one_or_none()
-            if job:
-                job.last_error = error
-                db.commit()
-
-    def clear_task_id(self, job_id: uuid.UUID) -> None:
-        with SessionLocal() as db:
-            job = db.execute(select(RebalanceJob).where(RebalanceJob.id == job_id)).scalar_one_or_none()
-            if job:
-                job.current_task_id = None
-                db.commit()
-
 
 class TradeExecutionRepository:
-
-    def symbols_for_job(self, job_id: uuid.UUID) -> set[str]:
-        with SessionLocal() as db:
-            rows = db.execute(
-                select(TradeExecution.symbol).where(TradeExecution.job_id == job_id)
-            ).all()
-            return {r[0] for r in rows}
-
-    def get_order_id(self, job_id: uuid.UUID, symbol: str) -> str | None:
-        with SessionLocal() as db:
-            ex = db.execute(
-                select(TradeExecution).where(
-                    TradeExecution.job_id == job_id,
-                    TradeExecution.symbol == symbol,
-                )
-            ).scalar_one_or_none()
-            return ex.alpaca_order_id if ex else None
 
     def record_submission(
         self, job_id: uuid.UUID, symbol: str, side: str, qty: float, order_id: str,
